@@ -11,7 +11,7 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(project_root)
 
 # Import from our new modular structure
-from src.hybrid import hybrid_recommend
+from src.hybrid import hybrid_recommend, profiled_hybrid_recommend
 from utils.helpers import (
     get_anime_image,
     genre_to_color,
@@ -315,21 +315,43 @@ def cached_load_anime_data():
 
 # Streamlit cache for recommendations
 @st.cache_data
-def get_recommendations(user_id, selected_anime, alpha, beta, gamma, ratings_df, anime_df):
-    return hybrid_recommend(
-        user_id=user_id,
-        selected_anime=selected_anime,
-        ratings_df=ratings_df,
-        anime_df=anime_df,
-        top_n=5,
-        alpha=alpha,
-        beta=beta,
-        gamma=gamma
-    )
+def get_recommendations(user_id, selected_anime, alpha, beta, gamma, ratings_df, anime_df, enable_profiling=False):
+    if enable_profiling:
+        return profiled_hybrid_recommend(
+            user_id=user_id,
+            selected_anime=selected_anime,
+            ratings_df=ratings_df,
+            anime_df=anime_df,
+            top_n=5,
+            alpha=alpha,
+            beta=beta,
+            gamma=gamma
+        )
+    else:
+        return hybrid_recommend(
+            user_id=user_id,
+            selected_anime=selected_anime,
+            ratings_df=ratings_df,
+            anime_df=anime_df,
+            top_n=5,
+            alpha=alpha,
+            beta=beta,
+            gamma=gamma
+        )
 
-# Load anime data
+# Load anime data - Pre-load at startup to reduce delay
 anime_df = cached_load_anime_data()
 anime_list = anime_df['name'].tolist()
+
+# Pre-load ratings data at startup (cached)
+@st.cache_data
+def load_ratings_data():
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    data_path = os.path.join(project_root, "data/ratings.csv")
+    return pd.read_csv(data_path)
+
+# Load ratings data at startup
+ratings_df = load_ratings_data()
 
 # Function to handle feedback clicks without using nested columns
 def handle_feedback(anime_name, feedback_type):
@@ -398,6 +420,42 @@ def show_netflix_style_recommendations(df, explanations=None):
     st.pyplot(fig)
     st.markdown("</div>", unsafe_allow_html=True)
 
+# Enhanced loading animation
+def show_loading_animation():
+    with st.spinner(""):
+        st.markdown("""
+        <div style="display: flex; justify-content: center; margin-top: 20px;">
+            <div class="spinner">
+                <style>
+                    .spinner {
+                        width: 40px;
+                        height: 40px;
+                        position: relative;
+                    }
+                    
+                    .spinner:before {
+                        content: "";
+                        box-sizing: border-box;
+                        position: absolute;
+                        width: 40px;
+                        height: 40px;
+                        border-radius: 50%;
+                        border: 3px solid transparent;
+                        border-top-color: #ff4baf;
+                        border-bottom-color: #ff4baf;
+                        animation: spin 1s linear infinite;
+                    }
+                    
+                    @keyframes spin {
+                        0% { transform: rotate(0deg); }
+                        100% { transform: rotate(360deg); }
+                    }
+                </style>
+            </div>
+        </div>
+        <p style="text-align: center; margin-top: 10px; color: #ff4baf;">Finding the perfect anime for you...</p>
+        """, unsafe_allow_html=True)
+
 # Animated background
 components.html("""
 <div style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
@@ -422,6 +480,10 @@ if 'recommendations' not in st.session_state:
     st.session_state.recommendations = None
 if 'explanations' not in st.session_state:
     st.session_state.explanations = None
+if 'recommending' not in st.session_state:
+    st.session_state.recommending = False
+if 'profiling' not in st.session_state:
+    st.session_state.profiling = False
 
 # Create the half-half layout
 left_col, right_col = st.columns(2)
@@ -474,28 +536,16 @@ with left_col:
         st.info(f"Current weights: SVD={alpha}, Neural={beta}, Content={gamma}")
     else:
         st.info(f"Content Weight: {gamma}")
+    
+    # Advanced options (collapsed by default)
+    with st.expander("Advanced Options"):
+        st.session_state.profiling = st.checkbox("Enable Performance Profiling", value=False)
+        if st.session_state.profiling:
+            st.warning("Profiling enabled. Performance results will be saved to 'profiles/' directory.")
 
     # Get recommendations button
     if st.button("Get Recommendations"):
-        with st.spinner("Finding your anime..."):
-            # Load ratings data
-            @st.cache_data
-            def load_ratings_data():
-                data_path = os.path.join(project_root, "data/ratings.csv")
-                return pd.read_csv(data_path)
-                
-            ratings_df = load_ratings_data()
-            
-            # Get recommendations
-            st.session_state.recommendations = get_recommendations(
-                user_id, selected_anime, alpha, beta, gamma, ratings_df, anime_df
-            )
-            
-            # Create explanations
-            st.session_state.explanations = [
-                f"SVD: {alpha:.1f}, NN: {beta:.1f}, Content: {gamma:.1f}" 
-                for _ in range(len(st.session_state.recommendations))
-            ]
+        st.session_state.recommending = True
     
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -503,6 +553,28 @@ with left_col:
 with right_col:
     st.markdown('<div class="output-card">', unsafe_allow_html=True)
     st.markdown('<p class="recommendation-title">✨ Your Recommendations ✨</p>', unsafe_allow_html=True)
+    
+    if st.session_state.recommending:
+        # This will show when the recommendation process is happening
+        show_loading_animation()
+        
+        # Get recommendations
+        st.session_state.recommendations = get_recommendations(
+            user_id, selected_anime, alpha, beta, gamma, ratings_df, anime_df, 
+            enable_profiling=st.session_state.profiling
+        )
+        
+        # Create explanations
+        st.session_state.explanations = [
+            f"SVD: {alpha:.1f}, NN: {beta:.1f}, Content: {gamma:.1f}" 
+            for _ in range(len(st.session_state.recommendations))
+        ]
+        
+        # Reset flag
+        st.session_state.recommending = False
+        
+        # Auto-rerun to update UI
+        st.rerun()
     
     if st.session_state.recommendations is not None:
         show_netflix_style_recommendations(st.session_state.recommendations, st.session_state.explanations)

@@ -2,62 +2,194 @@ import pandas as pd
 import os
 import streamlit as st
 from .jikan_api import fetch_anime_image, fetch_anime_data
+import numpy as np
+import random
+import requests
+import json
+import time
+from typing import Dict, List, Tuple, Any, Optional
+import colorsys
+import pickle
 
 # Anime quotes for the footer
 ANIME_QUOTES = [
-    "In our society, letting others find out that you're a nice person is a very risky move. – Hitagi Senjougahara",
-    "The world isn't perfect. But it's there for us, doing the best it can... that's what makes it so damn beautiful. – Roy Mustang",
-    "Forgetting is like a wound. The wound may heal, but it has already left a scar. – Monkey D. Luffy",
-    "If you don't like your destiny, don't accept it. Instead, have the courage to change it the way you want it to be. – Naruto Uzumaki",
-    "A lesson without pain is meaningless. That's because no one can gain without sacrificing something. – Edward Elric"
+    "I'll take a potato chip... and eat it!",
+    "The world isn't perfect. But it's there for us, doing the best it can.",
+    "Whatever you lose, you'll find it again. But what you throw away you'll never get back.",
+    "People's lives don't end when they die, it ends when they lose faith.",
+    "If you don't take risks, you can't create a future!",
+    "If you don't share someone's pain, you can never understand them.",
+    "Sometimes the questions are complicated and the answers are simple.",
+    "I don't want to conquer anything. I just think the guy with the most freedom in this ocean is the Pirate King!",
+    "It's not the face that makes someone a monster; it's the choices they make.",
+    "Sometimes it's necessary to do unnecessary things.",
+    "Being lonely is more painful than getting hurt.",
+    "Those who forgive themselves, and are able to accept their true nature... They are the strong ones!"
 ]
 
-def get_anime_image(title: str) -> str:
-    """Get the image URL for a given anime title using Jikan API."""
-    return fetch_anime_image(title)
+# Constants
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Create cache directories
+os.makedirs(os.path.join(PROJECT_ROOT, "cache"), exist_ok=True)
+os.makedirs(os.path.join(PROJECT_ROOT, "cache", "images"), exist_ok=True)
+
+# Image cache dictionary
+IMAGE_CACHE = {}
+
+def get_random_quote() -> str:
+    """Get a random anime quote."""
+    return random.choice(ANIME_QUOTES)
+
+def load_anime_data() -> pd.DataFrame:
+    """Load and preprocess anime data."""
+    # Load anime.csv
+    anime_path = os.path.join(PROJECT_ROOT, "data/anime.csv")
+    anime_df = pd.read_csv(anime_path)
+    
+    # Clean the data
+    anime_df.dropna(subset=['name'], inplace=True)
+    anime_df.fillna({'genre': 'Unknown', 'type': 'Unknown', 'rating': 0, 'members': 0}, inplace=True)
+    
+    # Filter out anime with very few members
+    anime_df = anime_df[anime_df['members'] >= 100]
+    
+    return anime_df
+
+def hsv_to_hex(h: float, s: float, v: float) -> str:
+    """Convert HSV color to hex."""
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return "#{:02x}{:02x}{:02x}".format(int(r*255), int(g*255), int(b*255))
+
+def genre_to_color(genre_string: str) -> str:
+    """Convert genre to a background color."""
+    if pd.isna(genre_string) or genre_string == '':
+        return '#1c1c1e'
+        
+    genres = genre_string.split(',')
+    main_genre = genres[0].strip()
+    
+    # Map common genres to colors
+    genre_colors = {
+        'Action': '#ff5e5e',
+        'Adventure': '#ffa55e',
+        'Comedy': '#ffff5e',
+        'Drama': '#ff5eff',
+        'Fantasy': '#5effff',
+        'Horror': '#8c1a1a',
+        'Mystery': '#8c6e1a',
+        'Romance': '#ff5ea3',
+        'Sci-Fi': '#5e8cff',
+        'Slice of Life': '#5eff8c',
+        'Sports': '#5effa5',
+        'Supernatural': '#a55eff',
+        'Thriller': '#8c1a4b'
+    }
+    
+    # Use the mapped color or generate one based on genre name
+    if main_genre in genre_colors:
+        return genre_colors[main_genre]
+    else:
+        # Generate a stable color based on the genre name
+        hue = sum(ord(c) for c in main_genre) % 360 / 360
+        return hsv_to_hex(hue, 0.6, 0.8)
+
+def save_image_to_cache(anime_name: str, image_url: str) -> None:
+    """Save image URL to cache."""
+    cache_path = os.path.join(PROJECT_ROOT, "cache", "images", "image_cache.pkl")
+    
+    # Update memory cache
+    IMAGE_CACHE[anime_name] = image_url
+    
+    # Update disk cache
+    try:
+        # Load existing cache if it exists
+        if os.path.exists(cache_path):
+            with open(cache_path, 'rb') as f:
+                disk_cache = pickle.load(f)
+        else:
+            disk_cache = {}
+            
+        # Update and save
+        disk_cache[anime_name] = image_url
+        with open(cache_path, 'wb') as f:
+            pickle.dump(disk_cache, f)
+    except:
+        # If caching fails, just continue
+        pass
+
+def load_image_cache() -> Dict[str, str]:
+    """Load image cache from disk."""
+    cache_path = os.path.join(PROJECT_ROOT, "cache", "images", "image_cache.pkl")
+    
+    # If memory cache is populated, use it
+    if IMAGE_CACHE:
+        return IMAGE_CACHE
+        
+    # Load from disk if available
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'rb') as f:
+                IMAGE_CACHE.update(pickle.load(f))
+            return IMAGE_CACHE
+        except:
+            # If loading fails, return empty dict
+            return {}
+    
+    return {}
+
+def get_anime_image(anime_name: str) -> str:
+    """Get anime image URL for display."""
+    # Load image cache
+    image_cache = load_image_cache()
+    
+    # Check cache first
+    if anime_name in image_cache:
+        return image_cache[anime_name]
+    
+    # Fallback images
+    fallback_images = [
+        "https://cdn.myanimelist.net/images/anime/10/47347.jpg",
+        "https://cdn.myanimelist.net/images/anime/5/73199.jpg",
+        "https://cdn.myanimelist.net/images/anime/1208/94745.jpg",
+        "https://cdn.myanimelist.net/images/anime/13/17405.jpg",
+        "https://cdn.myanimelist.net/images/anime/9/9453.jpg"
+    ]
+    
+    try:
+        # Try to get image from Jikan API (MyAnimeList)
+        search_url = f"https://api.jikan.moe/v4/anime?q={anime_name.replace(' ', '%20')}&limit=1"
+        response = requests.get(search_url, timeout=2)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('data') and len(data['data']) > 0:
+                image_url = data['data'][0]['images']['jpg']['image_url']
+                
+                # Cache the result
+                save_image_to_cache(anime_name, image_url)
+                
+                return image_url
+        
+        # Rate limiting or error - use fallback
+        fallback = random.choice(fallback_images)
+        save_image_to_cache(anime_name, fallback)
+        return fallback
+        
+    except Exception as e:
+        # If API fails, use a fallback image
+        fallback = random.choice(fallback_images)
+        save_image_to_cache(anime_name, fallback)
+        return fallback
+
+def enrich_with_images(recommendations_df: pd.DataFrame) -> pd.DataFrame:
+    """Add image URLs to recommendations DataFrame."""
+    # Just return as is - image URLs will be fetched by the UI
+    return recommendations_df
 
 def get_anime_details(title: str) -> dict:
     """Get detailed anime information using Jikan API."""
     return fetch_anime_data(title)
-
-def enrich_with_images(df: pd.DataFrame, title_col: str = "name") -> pd.DataFrame:
-    """
-    Given a DataFrame with a title column, add an 'image_url' column using Jikan API.
-    """
-    df["image_url"] = df[title_col].apply(fetch_anime_image)
-    return df
-
-def genre_to_color(genre: str) -> str:
-    """Map anime genres to specific colors."""
-    genre = str(genre).lower()
-    if "romance" in genre:
-        return "#ff4baf"
-    elif "action" in genre:
-        return "#ff0000"
-    elif "comedy" in genre:
-        return "#ff9500"
-    elif "horror" in genre:
-        return "#6e0dd0"
-    elif "sci-fi" in genre or "scifi" in genre:
-        return "#00bfff"
-    elif "drama" in genre:
-        return "#ff69b4"
-    elif "fantasy" in genre:
-        return "#9370db"
-    elif "mystery" in genre:
-        return "#4b0082"
-    else:
-        return "#1c1c1e"
-
-def load_anime_data() -> pd.DataFrame:
-    """Load the anime data from CSV file."""
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return pd.read_csv(os.path.join(project_root, "data/anime.csv"))
-
-def get_random_quote() -> str:
-    """Get a random anime quote."""
-    import random
-    return random.choice(ANIME_QUOTES)
 
 def load_and_merge_data():
     """

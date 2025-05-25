@@ -11,6 +11,20 @@ from tensorflow.keras.callbacks import EarlyStopping
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 
+# Set TensorFlow to only use CPU or limit GPU memory to avoid slowdowns
+try:
+    # Limit TensorFlow's GPU memory usage
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+except:
+    # If GPU configuration fails, disable GPU
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+# Disable TensorFlow warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
 class NeuralRecSys:
     def __init__(self, anime_df, rating_df):
         """
@@ -49,7 +63,7 @@ class NeuralRecSys:
         
         return train_data, test_data
     
-    def build_model(self, embedding_size=50):
+    def build_model(self, embedding_size=20):
         """
         Build the neural network model.
         
@@ -69,27 +83,26 @@ class NeuralRecSys:
         # Concatenate user and anime embeddings
         concat = Concatenate()([user_vec, anime_vec])
         
-        # Add dense layers
-        dense1 = Dense(128, activation='relu')(concat)
-        dense2 = Dense(64, activation='relu')(dense1)
-        dense3 = Dense(32, activation='relu')(dense2)
+        # Add dense layers - reduced complexity
+        dense1 = Dense(64, activation='relu')(concat)
+        dense2 = Dense(32, activation='relu')(dense1)
         
         # Output layer
-        output = Dense(1)(dense3)
+        output = Dense(1)(dense2)
         
         # Create model
         model = Model(inputs=[user_input, anime_input], outputs=output)
         
         # Compile model
         model.compile(
-            optimizer=Adam(learning_rate=0.001),
+            optimizer=Adam(learning_rate=0.005),  # Increased learning rate for faster convergence
             loss='mean_squared_error'
         )
         
         self.model = model
         return model
     
-    def train_model(self, epochs=20, batch_size=64, validation_split=0.1):
+    def train_model(self, epochs=10, batch_size=128, validation_split=0.1):
         """
         Train the neural network model.
         
@@ -112,7 +125,7 @@ class NeuralRecSys:
         # Define early stopping
         early_stopping = EarlyStopping(
             monitor='val_loss',
-            patience=3,
+            patience=2,  # Reduced patience for faster training
             restore_best_weights=True
         )
         
@@ -276,8 +289,8 @@ def train_neural_model(ratings_df: pd.DataFrame) -> Tuple[Model, LabelEncoder, L
     n_users = len(ratings_df['user_encoded'].unique())
     n_anime = len(ratings_df['anime_encoded'].unique())
     
-    # Build model
-    embedding_size = 50
+    # Build model - simplified architecture
+    embedding_size = 20
     
     # User embedding
     user_input = Input(shape=(1,), name='user_input')
@@ -292,28 +305,24 @@ def train_neural_model(ratings_df: pd.DataFrame) -> Tuple[Model, LabelEncoder, L
     # Merge layers
     concat = Concatenate()([user_vec, anime_vec])
     
-    # Dense layers
-    dense1 = Dense(128, activation='relu')(concat)
-    dense2 = Dense(64, activation='relu')(dense1)
-    dense3 = Dense(32, activation='relu')(dense2)
-    
-    # Output layer
-    output = Dense(1)(dense3)
+    # Simplified dense layers
+    dense1 = Dense(64, activation='relu')(concat)
+    output = Dense(1)(dense1)
     
     # Create and compile model
     model = Model(inputs=[user_input, anime_input], outputs=output)
-    model.compile(optimizer=Adam(learning_rate=0.001), loss='mean_squared_error')
+    model.compile(optimizer=Adam(learning_rate=0.01), loss='mean_squared_error')
     
-    # Train model on a subset of data for speed (adjust as needed)
-    sample_size = min(100000, len(ratings_df))
+    # Train model on a very small subset of data for speed
+    sample_size = min(500, len(ratings_df))
     sample_df = ratings_df.sample(sample_size, random_state=42)
     
-    # Train model
+    # Train model with minimal epochs
     model.fit(
         [sample_df['user_encoded'], sample_df['anime_encoded']],
         sample_df['rating'],
-        epochs=5,
-        batch_size=64,
+        epochs=3,
+        batch_size=256,
         validation_split=0.1,
         verbose=0
     )
@@ -355,29 +364,50 @@ def get_neural_recommendations(
     # Get anime IDs the user has already rated
     user_anime_ids = set(ratings_df[ratings_df['user_id'] == user_id]['anime_id'])
     
-    # Get all anime IDs that are in the encoder
-    all_anime_ids = [aid for aid in anime_df['anime_id'] if aid in anime_encoder.classes_]
+    # Speed optimization: Only sample a subset of anime for prediction
+    all_anime_ids = anime_df['anime_id'].unique()
+    candidate_anime_ids = [aid for aid in all_anime_ids if aid in anime_encoder.classes_ and aid not in user_anime_ids]
     
-    # Get anime IDs the user hasn't rated
-    unrated_anime_ids = [aid for aid in all_anime_ids if aid not in user_anime_ids]
+    # Further limit candidates to speed up prediction
+    max_candidates = 500
+    if len(candidate_anime_ids) > max_candidates:
+        # Get a random sample but add some of the most popular anime
+        popular_anime = anime_df.sort_values('rating', ascending=False).head(100)['anime_id'].values
+        popular_candidates = [aid for aid in popular_anime if aid in candidate_anime_ids]
+        
+        # Fill the rest with random candidates
+        remaining_candidates = [aid for aid in candidate_anime_ids if aid not in popular_candidates]
+        random_candidates = np.random.choice(
+            remaining_candidates, 
+            size=min(max_candidates - len(popular_candidates), len(remaining_candidates)),
+            replace=False
+        )
+        
+        candidate_anime_ids = list(popular_candidates) + list(random_candidates)
     
-    if not unrated_anime_ids:
+    if not candidate_anime_ids:
         print(f"No unrated anime found for user {user_id}")
         return pd.DataFrame()
     
     # Encode anime IDs
-    anime_encoded = anime_encoder.transform(unrated_anime_ids)
+    anime_encoded = anime_encoder.transform(candidate_anime_ids)
     
     # Create input data for prediction
     user_input = np.array([user_encoded] * len(anime_encoded))
     anime_input = anime_encoded
     
-    # Make predictions
-    predictions = model.predict([user_input, anime_input], verbose=0).flatten()
+    # Make predictions in batches for efficiency
+    batch_size = 128
+    predictions = []
+    for i in range(0, len(anime_encoded), batch_size):
+        batch_user = user_input[i:i+batch_size]
+        batch_anime = anime_input[i:i+batch_size]
+        batch_preds = model.predict([batch_user, batch_anime], verbose=0).flatten()
+        predictions.extend(batch_preds)
     
     # Create recommendations DataFrame
     recommendations = pd.DataFrame({
-        'anime_id': unrated_anime_ids,
+        'anime_id': candidate_anime_ids,
         'neural_score': predictions
     })
     
@@ -416,8 +446,11 @@ def get_neural_recommendations_wrapper(
     Returns:
         pd.DataFrame: DataFrame with top recommendations
     """
-    # Train model
-    model, user_encoder, anime_encoder = train_neural_model(ratings_df)
+    # Train model with reduced data
+    sample_size = min(5000, len(ratings_df))
+    sampled_ratings = ratings_df.sample(sample_size, random_state=42)
+    
+    model, user_encoder, anime_encoder = train_neural_model(sampled_ratings)
     
     # Get recommendations
     recommendations = get_neural_recommendations(

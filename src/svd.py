@@ -1,10 +1,10 @@
 import pandas as pd
 import numpy as np
 from surprise import Dataset, Reader, SVD
-from surprise.model_selection import train_test_split
+from surprise.model_selection import train_test_split, cross_validate
+from typing import List, Dict, Any
 import pickle
 import os
-from typing import List, Dict, Any
 
 class SVDRecSys:
     def __init__(self, anime_df, rating_df):
@@ -122,14 +122,43 @@ class SVDRecSys:
         self.prepare_data()
 
 def train_svd_model(ratings_df: pd.DataFrame) -> SVD:
-    """Train SVD model on ratings data."""
+    """
+    Train an SVD model on the ratings data.
+    
+    Args:
+        ratings_df (pd.DataFrame): DataFrame containing user ratings
+        
+    Returns:
+        SVD: Trained SVD model
+    """
+    # Filter out ratings with -1 (not rated)
+    filtered_ratings = ratings_df[ratings_df['rating'] != -1].copy()
+    
+    # For large datasets, take a sample to speed up training
+    sample_size = min(5000, len(filtered_ratings))
+    if len(filtered_ratings) > sample_size:
+        filtered_ratings = filtered_ratings.sample(sample_size, random_state=42)
+    
+    # Create Surprise reader and dataset
     reader = Reader(rating_scale=(1, 10))
-    data = Dataset.load_from_df(ratings_df[['user_id', 'anime_id', 'rating']], reader)
+    data = Dataset.load_from_df(
+        filtered_ratings[['user_id', 'anime_id', 'rating']], 
+        reader
+    )
+    
+    # Build full trainset
     trainset = data.build_full_trainset()
     
-    model = SVD(n_factors=100, n_epochs=20, lr_all=0.005, reg_all=0.02)
-    model.fit(trainset)
-    return model
+    # Train SVD model with optimized parameters for speed
+    svd = SVD(
+        n_factors=50,
+        n_epochs=10,  # Reduced from default 20
+        lr_all=0.01,  # Increased learning rate for faster convergence
+        reg_all=0.02
+    )
+    svd.fit(trainset)
+    
+    return svd
 
 def get_svd_recommendations(
     model: SVD,
@@ -137,22 +166,56 @@ def get_svd_recommendations(
     anime_df: pd.DataFrame,
     top_n: int = 10
 ) -> pd.DataFrame:
-    """Get recommendations using SVD model."""
+    """
+    Get recommendations for a user using the trained SVD model.
+    
+    Args:
+        model (SVD): Trained SVD model
+        user_id (int): User ID to get recommendations for
+        anime_df (pd.DataFrame): DataFrame containing anime information
+        top_n (int): Number of recommendations to return
+        
+    Returns:
+        pd.DataFrame: DataFrame containing top N recommendations
+    """
     # Get all anime IDs
     all_anime_ids = anime_df['anime_id'].unique()
     
-    # Get predictions for all anime
+    # For faster predictions, limit to a maximum of 5000 anime
+    if len(all_anime_ids) > 5000:
+        # Include some of the most popular anime
+        popular_anime = anime_df.nlargest(1000, 'members')['anime_id'].values
+        
+        # Take a random sample for the rest
+        remaining_anime = np.setdiff1d(all_anime_ids, popular_anime)
+        random_sample = np.random.choice(remaining_anime, 4000, replace=False)
+        
+        all_anime_ids = np.concatenate([popular_anime, random_sample])
+    
+    # Make predictions
     predictions = []
     for anime_id in all_anime_ids:
-        pred = model.predict(user_id, anime_id)
-        predictions.append({
-            'anime_id': anime_id,
-            'predicted_rating': pred.est
-        })
+        try:
+            # Use raw prediction for faster performance (no inner algorithm)
+            pred = model.predict(user_id, anime_id)
+            predictions.append((anime_id, pred.est))
+        except:
+            # Skip if prediction fails
+            continue
     
-    # Convert to DataFrame and merge with anime info
-    pred_df = pd.DataFrame(predictions)
-    recommendations = pred_df.merge(anime_df, on='anime_id')
+    # Sort predictions by estimated rating
+    predictions.sort(key=lambda x: x[1], reverse=True)
     
-    # Sort by predicted rating and return top N
-    return recommendations.sort_values('predicted_rating', ascending=False).head(top_n)
+    # Get top N recommendations
+    top_predictions = predictions[:top_n]
+    
+    # Create DataFrame with recommendations
+    recommendations = pd.DataFrame(top_predictions, columns=['anime_id', 'predicted_rating'])
+    
+    # Add anime information
+    recommendations = recommendations.merge(
+        anime_df[['anime_id', 'name', 'genre', 'type', 'rating']], 
+        on='anime_id'
+    )
+    
+    return recommendations
